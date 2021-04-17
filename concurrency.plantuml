@@ -1,0 +1,33 @@
+@startuml
+
+file output as "stdout"
+
+node routineRoot as "Root go-routine\nscrapes input url"
+node go_routine_1 as "scraper go routine 1"
+node go_routine_11 as "scraper go routine 11"
+node go_routine_12 as "scraper go routine 11"
+node go_routine_2 as "scraper go routine 2"
+node go_routine_3 as "scraper go routine 3"
+node go_routine_31 as "scraper go routine 31"
+node go_routine_n as "scraper go routine n"
+
+
+url --> routineRoot
+routineRoot --> go_routine_1 : child eligible url
+go_routine_1 --> go_routine_11 : child eligible url
+go_routine_1 --> go_routine_12 : child eligible url
+routineRoot --> go_routine_2 : child eligible url
+routineRoot --> go_routine_3 : child eligible url
+go_routine_3 --> go_routine_31 : child eligible url
+routineRoot --> go_routine_n : child eligible url
+
+go_routine_1 --> output : url + links
+go_routine_11 --> output : url + links
+go_routine_12 --> output : url + links
+go_routine_2 --> output : url + links
+go_routine_3 --> output : url + links
+go_routine_31 --> output : url + links
+go_routine_n --> output : url + links
+
+
+@enduml

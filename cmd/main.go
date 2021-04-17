@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"github.com/rbroggi/crawler/crawler"
-	"log"
+	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/html"
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -15,24 +18,51 @@ import (
 func main() {
 	// cmd line flags
 	rootURL := flag.String("url", "http://localhost:8080/index.html", "URL to be recursively crawled")
-	maxPoolSize := flag.CommandLine.Uint("pool", 100000, "The max number of go-routines that can be created")
 	flag.Parse()
 
-	// Create a new context
+	// Create a new context that can be cancelled with ctrl+c
 	ctx := signalContext(context.Background())
 
-	c := crawler.NewCrawler(uint32(*maxPoolSize))
+	// Parsing input URL
 	baseURL, err := url.Parse(*rootURL)
 	if err != nil {
-		log.Printf("Error while parsing URL: [%v]", err)
+		log.Errorf("Error while parsing root URL: [%v]", err)
 		os.Exit(1)
 	}
-	// Crawl url
-	err = c.Crawl(ctx, baseURL)
+
+	c := crawler.NewCrawler()
+	// Crawl input URL and for each page prints url + links
+	err = c.Crawl(ctx, baseURL, WritePageURLAndLinksToStdOut)
 	if err != nil {
 		log.Printf("Error while crawling: [%v]\n", err)
 		os.Exit(2)
 	}
+}
+
+// WritePageURLAndLinksToStdOut takes a page url and it's html content
+// and writes to stdout the url of the page along with all the
+// links in the page in both the raw form (the one in found in the html)
+// and in it's absolute form
+func WritePageURLAndLinksToStdOut(u *url.URL, page *html.Node) {
+	var b strings.Builder
+	_, err := fmt.Fprintf(&b, "url: %s\n", u.String())
+	if err != nil {
+		log.Errorf("Error while writing into strings.Builder")
+		return
+	}
+	links := crawler.GetPageLinks(page)
+	for link := range links {
+		absLink, err := crawler.GetLinkAbsoluteUrl(u, link)
+		if err != nil {
+			log.Errorf("Error while parsing link: [%s]", link)
+		}
+		_, err = fmt.Fprintf(&b, "link: %s | abs link: %s\n", link, absLink)
+		if err != nil {
+			log.Errorf("Error while writing into strings.Builder")
+			return
+		}
+	}
+	fmt.Println(b.String())
 }
 
 // signalContext takes a parentCtx and returns
