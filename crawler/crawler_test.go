@@ -258,37 +258,53 @@ func Test_crawler_Crawl_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
-
-	// build a crawler
-	c := &crawler{}
-	// build a visit function that collects in a map all the
-	// page titles
-	m := make(map[string]struct{})
-	mut := sync.Mutex{}
-
-	// visit is a function that given a page collects
-	// it's title and adds it to a set of titles
-	visit := func(u *url.URL, page *html.Node) {
-		title := pageTitle(page)
-		// add the title to the map
-		mut.Lock()
-		m[title] = struct{}{}
-		mut.Unlock()
-	}
-	err := c.Crawl(context.Background(), getURL(getBaseURLIndex()), visit)
-	assert.Nil(t, err)
-
-	// want is the titles of all the pages on the web-server
-	want := map[string]struct{}{
-		"index":  {},
-		"page1":  {},
-		"page2":  {},
-		"page3":  {},
-		"page11": {},
+	tests := map[string]struct {
+		c Crawler
+	}{
+		"recursive_crawler": {
+			c: NewCrawler(),
+		},
+		"serial_ciclic_crawler": {
+			c: NewCiclicCrawler(1),
+		},
+		"serial_ciclic_crawler_concurrent": {
+			c: NewCiclicCrawler(10),
+		},
 	}
 
-	// check equality on collected titles and expected titles
-	assert.True(t, reflect.DeepEqual(m, want))
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+
+			// build a visit function that collects in a map all the
+			// page titles
+			m := make(map[string]struct{})
+			mut := sync.Mutex{}
+
+			// visit is a function that given a page collects
+			// it's title and adds it to a set of titles
+			visit := func(u *url.URL, page *html.Node) {
+				title := pageTitle(page)
+				// add the title to the map
+				mut.Lock()
+				m[title] = struct{}{}
+				mut.Unlock()
+			}
+			err := tt.c.Crawl(context.Background(), getURL(getBaseURLIndex()), visit)
+			assert.Nil(t, err)
+
+			// want is the titles of all the pages on the web-server
+			want := map[string]struct{}{
+				"index":  {},
+				"page1":  {},
+				"page2":  {},
+				"page3":  {},
+				"page11": {},
+			}
+
+			// check equality on collected titles and expected titles
+			assert.True(t, reflect.DeepEqual(m, want))
+		})
+	}
 }
 
 // Test_crawler_Crawl_Cancelation_Integration will test that the crawler is cancellable

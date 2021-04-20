@@ -1,0 +1,30 @@
+@startuml
+
+
+node orchestrator as "Orchestrator go-routine\n - listens to candidate URLs\n - perform duplication-check\n - spawns scraper go-routines"
+node scraper_1 as "scraper go routine 1\n - visits page\n - extract links"
+node scraper_2 as "scraper go routine 2\n - visits page\n - extract links"
+node scraper_3 as "scraper go routine 3\n - visits page\n - extract links"
+node scraper_n as "scraper go routine n\n - visits page\n - extract links"
+
+queue chCandidateURLs
+
+url -> chCandidateURLs : feed root URL
+
+orchestrator --> scraper_1 : url to scrape
+scraper_1 --> chCandidateURLs : links
+
+orchestrator --> scraper_2 : url to scrape
+scraper_2 --> chCandidateURLs : links
+
+orchestrator --> scraper_3 : url to scrape
+scraper_3 --> chCandidateURLs : links
+
+orchestrator --> scraper_n : url to scrape
+scraper_n --> chCandidateURLs : links
+
+chCandidateURLs --> orchestrator : feed candidate links
+
+
+
+@enduml

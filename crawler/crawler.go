@@ -11,6 +11,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Crawler is used to Crawl a web-site
@@ -22,6 +23,10 @@ type Crawler interface {
 }
 
 type crawler struct {
+}
+
+type cyclicCrawler struct {
+	maxConcurrency uint32
 }
 
 func (c *crawler) Crawl(ctx context.Context, base *url.URL, visit func(u *url.URL, page *html.Node)) error {
@@ -180,4 +185,99 @@ func getPage(ctx context.Context, url string) (*html.Node, error) {
 		return nil, fmt.Errorf("error while html parsing response - %v", err)
 	}
 	return b, err
+}
+
+// scrapePageIntoChannel gets content of a page, visits it
+// and write all the link urls to the chLinkCandidates channel
+func scrapePageIntoChannel(ctx context.Context, u *url.URL, visit func(u *url.URL, page *html.Node), chLinkCandidates chan<- *url.URL) {
+	// early return for empty url
+	if u == nil {
+		log.Errorf("empty url cannot be scraped")
+		return
+	}
+	// get and parse page
+	page, err := getPage(ctx, u.String())
+	if err != nil {
+		log.Errorf("error while getting page - %v", err)
+		return
+	}
+	// visit page
+	visit(u, page)
+
+	// retrieve page links
+	links := GetPageLinks(page)
+
+	// insert all page urls into the candidates channel
+	for link := range links {
+		absLink, err := GetLinkAbsoluteUrl(u, link)
+		if err != nil {
+			log.Errorf("failed to get absolute link on page %s with relative link %s", u, link)
+			continue
+		}
+		if isSameDomain(u, absLink) {
+			chLinkCandidates <- absLink
+		}
+	}
+}
+
+func NewCiclicCrawler(maxConcurrency uint32) Crawler {
+	return &cyclicCrawler{maxConcurrency}
+}
+
+func (c *cyclicCrawler) Crawl(ctx context.Context, base *url.URL, visit func(u *url.URL, page *html.Node)) error {
+
+	if base == nil {
+		return errors.New("nil base URL cannot be crawled")
+	}
+
+	chLinkCandidates := make(chan *url.URL, c.maxConcurrency)
+	visited := make(map[string]struct{})
+	numGoroutines := uint32(0)
+
+	// enqueue the first url - base:
+	chLinkCandidates <- base
+
+ListenerLoop:
+	for {
+		select {
+		case candidateURL := <-chLinkCandidates:
+			_, ok := visited[candidateURL.String()]
+			if !ok {
+				visited[candidateURL.String()] = struct{}{}
+				// launch scraping go-routine
+				atomic.AddUint32(&numGoroutines, 1)
+				go func(num *uint32, u *url.URL) {
+					// decrement number of go-routines
+					defer atomic.AddUint32(num, ^uint32(0))
+					scrapePageIntoChannel(ctx, candidateURL, visit, chLinkCandidates)
+				}(&numGoroutines, candidateURL)
+			}
+		case <-ctx.Done():
+			break ListenerLoop
+		default:
+			// if no ongoing scraping and no item in the chLinkCandidates (only condition under which we fall into the
+			// default) loop we can break from the loop
+			if atomic.LoadUint32(&numGoroutines) == 0 {
+				break ListenerLoop
+			}
+
+			candidateURL := <-chLinkCandidates
+			_, ok := visited[candidateURL.String()]
+			if !ok {
+				visited[candidateURL.String()] = struct{}{}
+				// launch scraping go-routine
+				atomic.AddUint32(&numGoroutines, 1)
+				go func(num *uint32) {
+					// decrement number of go-routines
+					defer atomic.AddUint32(num, ^uint32(0))
+					scrapePageIntoChannel(ctx, candidateURL, visit, chLinkCandidates)
+				}(&numGoroutines)
+			}
+		}
+	}
+
+	// close the channel
+	close(chLinkCandidates)
+
+	return nil
 }
