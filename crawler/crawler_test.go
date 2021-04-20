@@ -265,10 +265,10 @@ func Test_crawler_Crawl_Integration(t *testing.T) {
 			c: NewCrawler(),
 		},
 		"serial_ciclic_crawler": {
-			c: NewCiclicCrawler(1),
+			c: NewCyclicCrawler(1),
 		},
 		"serial_ciclic_crawler_concurrent": {
-			c: NewCiclicCrawler(10),
+			c: NewCyclicCrawler(10),
 		},
 	}
 

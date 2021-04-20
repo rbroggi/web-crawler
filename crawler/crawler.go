@@ -220,7 +220,7 @@ func scrapePageIntoChannel(ctx context.Context, u *url.URL, visit func(u *url.UR
 	}
 }
 
-func NewCiclicCrawler(maxConcurrency uint32) Crawler {
+func NewCyclicCrawler(maxConcurrency uint32) Crawler {
 	return &cyclicCrawler{maxConcurrency}
 }
 
