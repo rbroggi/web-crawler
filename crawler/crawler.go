@@ -187,9 +187,9 @@ func getPage(ctx context.Context, url string) (*html.Node, error) {
 	return b, err
 }
 
-// scrapePageIntoChannel gets content of a page, visits it
+// scrapePage gets content of a page, visits it
 // and write all the link urls to the chLinkCandidates channel
-func scrapePageIntoChannel(ctx context.Context, u *url.URL, visit func(u *url.URL, page *html.Node), chLinkCandidates chan<- *url.URL) {
+func scrapePage(ctx context.Context, u *url.URL, visit func(u *url.URL, page *html.Node), chLinkCandidates chan<- []*url.URL) {
 	// early return for empty url
 	if u == nil {
 		log.Errorf("empty url cannot be scraped")
@@ -207,6 +207,8 @@ func scrapePageIntoChannel(ctx context.Context, u *url.URL, visit func(u *url.UR
 	// retrieve page links
 	links := GetPageLinks(page)
 
+	absLinks := make([]*url.URL, 0, len(links))
+
 	// insert all page urls into the candidates channel
 	for link := range links {
 		absLink, err := GetLinkAbsoluteUrl(u, link)
@@ -215,9 +217,11 @@ func scrapePageIntoChannel(ctx context.Context, u *url.URL, visit func(u *url.UR
 			continue
 		}
 		if isSameDomain(u, absLink) {
-			chLinkCandidates <- absLink
+			absLinks = append(absLinks, absLink)
 		}
 	}
+
+	chLinkCandidates <- absLinks
 }
 
 func NewCyclicCrawler(maxConcurrency uint32) Crawler {
@@ -230,49 +234,36 @@ func (c *cyclicCrawler) Crawl(ctx context.Context, base *url.URL, visit func(u *
 		return errors.New("nil base URL cannot be crawled")
 	}
 
-	chLinkCandidates := make(chan *url.URL, c.maxConcurrency)
 	visited := make(map[string]struct{})
+	maxConcurrent := uint32(1)
+	if c.maxConcurrency > maxConcurrent {
+		maxConcurrent = c.maxConcurrency
+	}
+	tokens := make(chan struct{}, maxConcurrent)
+	chLinkCandidates := make(chan []*url.URL, 2*maxConcurrent)
 	numGoroutines := uint32(0)
 
 	// enqueue the first url - base:
-	chLinkCandidates <- base
+	chLinkCandidates <- []*url.URL{base}
 
 ListenerLoop:
 	for {
 		select {
-		case candidateURL := <-chLinkCandidates:
-			_, ok := visited[candidateURL.String()]
-			if !ok {
-				visited[candidateURL.String()] = struct{}{}
-				// launch scraping go-routine
-				atomic.AddUint32(&numGoroutines, 1)
-				go func(num *uint32, u *url.URL) {
-					// decrement number of go-routines
-					defer atomic.AddUint32(num, ^uint32(0))
-					scrapePageIntoChannel(ctx, candidateURL, visit, chLinkCandidates)
-				}(&numGoroutines, candidateURL)
-			}
+		case candidateURLs := <-chLinkCandidates:
+			dispatchScrapperGoRoutines(ctx, tokens, visited, candidateURLs, &numGoroutines, visit, chLinkCandidates)
 		case <-ctx.Done():
 			break ListenerLoop
 		default:
 			// if no ongoing scraping and no item in the chLinkCandidates (only condition under which we fall into the
-			// default) loop we can break from the loop
+			// default case) loop we can break from the loop
 			if atomic.LoadUint32(&numGoroutines) == 0 {
 				break ListenerLoop
 			}
 
-			candidateURL := <-chLinkCandidates
-			_, ok := visited[candidateURL.String()]
-			if !ok {
-				visited[candidateURL.String()] = struct{}{}
-				// launch scraping go-routine
-				atomic.AddUint32(&numGoroutines, 1)
-				go func(num *uint32) {
-					// decrement number of go-routines
-					defer atomic.AddUint32(num, ^uint32(0))
-					scrapePageIntoChannel(ctx, candidateURL, visit, chLinkCandidates)
-				}(&numGoroutines)
-			}
+			// at least one ongoing go-routine
+			// this is an optimization to avoid over-use of CPU (by cycling indefinitely)
+			candidateURLs := <-chLinkCandidates
+			dispatchScrapperGoRoutines(ctx, tokens, visited, candidateURLs, &numGoroutines, visit, chLinkCandidates)
 		}
 	}
 
@@ -280,4 +271,36 @@ ListenerLoop:
 	close(chLinkCandidates)
 
 	return nil
+}
+
+func dispatchScrapperGoRoutines(
+	ctx context.Context,
+	tokens chan struct{},
+	visited map[string]struct{},
+	candidateURLs []*url.URL,
+	numGoroutines *uint32,
+	visit func(u *url.URL, page *html.Node),
+	chLinkCandidates chan<- []*url.URL,
+) {
+	for _, candidateURL := range candidateURLs {
+		_, ok := visited[candidateURL.String()]
+		if !ok {
+			visited[candidateURL.String()] = struct{}{}
+			// launch scraping go-routine
+			atomic.AddUint32(numGoroutines, 1)
+			// acquire token (blocks if max number of tokens already ongoing)
+			tokens <- struct{}{}
+			go func(num *uint32, u *url.URL) {
+				// decrement number of go-routines
+				defer atomic.AddUint32(num, ^uint32(0))
+				// release token (release token for another go-routine to pick)
+				defer releaseToken(tokens)
+				scrapePage(ctx, u, visit, chLinkCandidates)
+			}(numGoroutines, candidateURL)
+		}
+	}
+}
+
+func releaseToken(tokens <-chan struct{}) {
+	<-tokens
 }

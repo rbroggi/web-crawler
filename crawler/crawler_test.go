@@ -264,6 +264,9 @@ func Test_crawler_Crawl_Integration(t *testing.T) {
 		"recursive_crawler": {
 			c: NewCrawler(),
 		},
+		"ciclic_crawler": {
+			c: NewCyclicCrawler(0),
+		},
 		"serial_ciclic_crawler": {
 			c: NewCyclicCrawler(1),
 		},
