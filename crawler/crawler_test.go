@@ -318,39 +318,81 @@ func Test_crawler_Crawl_Cancelation_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
-	// build a crawler
-	c := &crawler{}
-	// build a visit function that collects in a map all the
-	// page titles
-	m := make(map[string]struct{})
-	mut := sync.Mutex{}
 
-	// creating ctx with cancellation feature
-	ctx, cancel := context.WithCancel(context.Background())
 
-	// visit is a function that given a page collects
+	tests := map[string]struct {
+		c Crawler
+	}{
+		"recursive_crawler": {
+			c: NewCrawler(),
+		},
+		"ciclic_crawler": {
+			c: NewCyclicCrawler(0),
+		},
+		"serial_ciclic_crawler": {
+			c: NewCyclicCrawler(1),
+		},
+		"serial_ciclic_crawler_concurrent": {
+			c: NewCyclicCrawler(10),
+		},
+	}
+
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			// build a visit function that collects in a map all the
+			// page titles
+			m := make(map[string]struct{})
+			mut := sync.Mutex{}
+
+			// creating ctx with cancellation feature
+			ctx, cancel := context.WithCancel(context.Background())
+
+			// visit is a function that given a page collects
+			// it's title and adds it to a set of titles
+			visit := func(u *url.URL, page *html.Node) {
+				title := pageTitle(page)
+				// add the title to the map
+				mut.Lock()
+				m[title] = struct{}{}
+				mut.Unlock()
+
+				// issues the cancellation after first title was collected
+				// rest of the pages should not get scraped
+				cancel()
+			}
+
+			err := tt.c.Crawl(ctx, getURL(getBaseURLIndex()), visit)
+			assert.Nil(t, err)
+
+			// want contains only the title of the root page because the cancellation was
+			// issued before the scrapping could finish the first node
+			want := map[string]struct{}{
+				"index": {},
+			}
+
+			// check equality on collected titles and expected titles
+			assert.True(t, reflect.DeepEqual(m, want))
+		})
+	}
+}
+
+func BenchmarkProcess(b *testing.B) {
+	// visit is a function that uses sleep in order to simulate
 	// it's title and adds it to a set of titles
 	visit := func(u *url.URL, page *html.Node) {
 		title := pageTitle(page)
-		// add the title to the map
-		mut.Lock()
-		m[title] = struct{}{}
-		mut.Unlock()
-
-		// issues the cancellation after first title was collected
-		// rest of the pages should not get scraped
-		cancel()
+		fmt.Printf("url [%s] title: [%s]\n\n", u.String(), title)
+		//time.Sleep(200 * time.Microsecond)
 	}
 
-	err := c.Crawl(ctx, getURL(getBaseURLIndex()), visit)
-	assert.Nil(t, err)
-
-	// want contains only the title of the root page because the cancellation was
-	// issued before the scrapping could finish the first node
-	want := map[string]struct{}{
-		"index": {},
+	for t := 32; t <= 1024; t = t * 2 {
+		b.Run(fmt.Sprintf("%d-routines", t), func(b *testing.B) {
+			c := NewCyclicCrawler(uint32(t))
+			//c := NewCrawler()
+			//ctx, _ := context.WithTimeout(context.Background(), time.Second*3)
+			base, _ := url.Parse("https://webscraper.io/test-sites/e-commerce/allinone")
+			c.Crawl(context.Background(), base, visit)
+		})
 	}
-
-	// check equality on collected titles and expected titles
-	assert.True(t, reflect.DeepEqual(m, want))
 }

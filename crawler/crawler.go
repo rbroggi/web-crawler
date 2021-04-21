@@ -189,7 +189,7 @@ func getPage(ctx context.Context, url string) (*html.Node, error) {
 
 // scrapePage gets content of a page, visits it
 // and write all the link urls to the chLinkCandidates channel
-func scrapePage(ctx context.Context, u *url.URL, visit func(u *url.URL, page *html.Node), chLinkCandidates chan<- []*url.URL) {
+func scrapePage(ctx context.Context, u *url.URL, visit func(u *url.URL, page *html.Node), chLinkCandidates chan<- *url.URL) {
 	// early return for empty url
 	if u == nil {
 		log.Errorf("empty url cannot be scraped")
@@ -207,8 +207,6 @@ func scrapePage(ctx context.Context, u *url.URL, visit func(u *url.URL, page *ht
 	// retrieve page links
 	links := GetPageLinks(page)
 
-	absLinks := make([]*url.URL, 0, len(links))
-
 	// insert all page urls into the candidates channel
 	for link := range links {
 		absLink, err := GetLinkAbsoluteUrl(u, link)
@@ -217,11 +215,10 @@ func scrapePage(ctx context.Context, u *url.URL, visit func(u *url.URL, page *ht
 			continue
 		}
 		if isSameDomain(u, absLink) {
-			absLinks = append(absLinks, absLink)
+			chLinkCandidates <- absLink
 		}
 	}
 
-	chLinkCandidates <- absLinks
 }
 
 func NewCyclicCrawler(maxConcurrency uint32) Crawler {
@@ -240,17 +237,17 @@ func (c *cyclicCrawler) Crawl(ctx context.Context, base *url.URL, visit func(u *
 		maxConcurrent = c.maxConcurrency
 	}
 	tokens := make(chan struct{}, maxConcurrent)
-	chLinkCandidates := make(chan []*url.URL, 2*maxConcurrent)
 	numGoroutines := uint32(0)
+	infIn, infOut := InfiniteChannels()
 
 	// enqueue the first url - base:
-	chLinkCandidates <- []*url.URL{base}
+	infIn <- base
 
 ListenerLoop:
 	for {
 		select {
-		case candidateURLs := <-chLinkCandidates:
-			dispatchScrapperGoRoutines(ctx, tokens, visited, candidateURLs, &numGoroutines, visit, chLinkCandidates)
+		case candidateURLs := <-infOut:
+			dispatchScrapperGoRoutines(ctx, tokens, visited, candidateURLs, &numGoroutines, visit, infIn)
 		case <-ctx.Done():
 			break ListenerLoop
 		default:
@@ -262,13 +259,13 @@ ListenerLoop:
 
 			// at least one ongoing go-routine
 			// this is an optimization to avoid over-use of CPU (by cycling indefinitely)
-			candidateURLs := <-chLinkCandidates
-			dispatchScrapperGoRoutines(ctx, tokens, visited, candidateURLs, &numGoroutines, visit, chLinkCandidates)
+			candidateURLs := <-infOut
+			dispatchScrapperGoRoutines(ctx, tokens, visited, candidateURLs, &numGoroutines, visit, infIn)
 		}
 	}
 
 	// close the channel
-	close(chLinkCandidates)
+	close(infIn)
 
 	return nil
 }
@@ -277,30 +274,68 @@ func dispatchScrapperGoRoutines(
 	ctx context.Context,
 	tokens chan struct{},
 	visited map[string]struct{},
-	candidateURLs []*url.URL,
+	candidateURL *url.URL,
 	numGoroutines *uint32,
 	visit func(u *url.URL, page *html.Node),
-	chLinkCandidates chan<- []*url.URL,
+	chLinkCandidates chan<- *url.URL,
 ) {
-	for _, candidateURL := range candidateURLs {
-		_, ok := visited[candidateURL.String()]
-		if !ok {
-			visited[candidateURL.String()] = struct{}{}
-			// launch scraping go-routine
-			atomic.AddUint32(numGoroutines, 1)
-			// acquire token (blocks if max number of tokens already ongoing)
-			tokens <- struct{}{}
-			go func(num *uint32, u *url.URL) {
-				// decrement number of go-routines
-				defer atomic.AddUint32(num, ^uint32(0))
-				// release token (release token for another go-routine to pick)
-				defer releaseToken(tokens)
-				scrapePage(ctx, u, visit, chLinkCandidates)
-			}(numGoroutines, candidateURL)
-		}
+	_, ok := visited[candidateURL.String()]
+	if !ok {
+		visited[candidateURL.String()] = struct{}{}
+		// launch scraping go-routine
+		atomic.AddUint32(numGoroutines, 1)
+		// acquire token (blocks if max number of tokens already ongoing)
+		tokens <- struct{}{}
+		go func(num *uint32, u *url.URL) {
+			// decrement number of go-routines
+			defer atomic.AddUint32(num, ^uint32(0))
+			// release token (release token for another go-routine to pick)
+			defer releaseToken(tokens)
+			scrapePage(ctx, u, visit, chLinkCandidates)
+		}(numGoroutines, candidateURL)
 	}
 }
 
 func releaseToken(tokens <-chan struct{}) {
 	<-tokens
+}
+
+func InfiniteChannels() (chan<- *url.URL, <-chan *url.URL) {
+	in := make(chan *url.URL)
+	out := make(chan *url.URL)
+	go func() {
+		var queue []*url.URL
+
+		// returns out chan if the queue has elements
+		// otherwise return nil (which blocks
+		outCh := func() chan *url.URL {
+			if len(queue) == 0 {
+				return nil
+			}
+			return out
+		}
+		curVal := func() *url.URL {
+			if len(queue) == 0 {
+				return nil
+			}
+			return queue[0]
+		}
+
+		for len(queue) > 0 || in != nil {
+			select {
+			case v, ok := <-in:
+				// chan closed
+				if !ok {
+					in = nil
+				} else {
+					queue = append(queue, v)
+				}
+			case outCh() <- curVal():
+				queue = queue[1:]
+			}
+		}
+		close(out)
+	}()
+
+	return in, out
 }
